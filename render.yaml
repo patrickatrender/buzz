@@ -1,0 +1,123 @@
+# Render Blueprint for the Buzz relay, translated from deploy/compose/compose.yml.
+#
+# Mapping from compose:
+#   relay        -> buzz-relay   (web service, built from the repo's root Dockerfile)
+#   postgres     -> buzz-postgres (Render Managed Postgres)
+#   redis        -> buzz-cache    (Render Key Value / Valkey)
+#   minio        -> buzz-storage  (private service running the minio image + a disk)
+#   minio-init   -> no direct equivalent; see the note above buzz-storage below.
+#
+# Adjust region/plan/disk sizes for your traffic and data volume before going to production.
+# Validate with: render blueprints validate
+
+databases:
+  - name: buzz-postgres
+    databaseName: buzz
+    user: buzz
+    plan: basic-1gb
+    region: oregon
+    postgresMajorVersion: "17"
+
+services:
+  - type: web
+    name: buzz-relay
+    runtime: docker
+    region: oregon
+    plan: standard
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    # /_readiness is also mounted on the main api router (router.rs), not just
+    # the separate BUZZ_HEALTH_PORT listener, so the public port can serve it.
+    healthCheckPath: /_readiness
+    disk:
+      name: buzz-git-data
+      mountPath: /data/git
+      sizeGB: 10
+    envVars:
+      # The app binds BUZZ_BIND_ADDR, not Render's PORT convention directly —
+      # pin both to the same value so Render's proxy and the app agree.
+      - key: PORT
+        value: "10000"
+      - key: BUZZ_BIND_ADDR
+        value: 0.0.0.0:10000
+      - key: BUZZ_HEALTH_PORT
+        value: "8080"
+      - key: BUZZ_METRICS_PORT
+        value: "9102"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: buzz-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: buzz-cache
+          type: keyvalue
+          property: connectionString
+      # buzz-storage is a private service reachable at <name>:<port> on the
+      # private network — no public URL, so this is a plain literal, not a
+      # dynamic lookup.
+      - key: BUZZ_S3_ENDPOINT
+        value: http://buzz-storage:9000
+      # Compose's comment still applies on Render: internal DNS resolves the
+      # service name, not virtual-hosted-style `<bucket>.buzz-storage`.
+      - key: BUZZ_S3_ADDRESSING_STYLE
+        value: path
+      - key: BUZZ_S3_ACCESS_KEY
+        generateValue: true
+      - key: BUZZ_S3_SECRET_KEY
+        generateValue: true
+      - key: BUZZ_S3_BUCKET
+        value: buzz-media
+      - key: BUZZ_GIT_REPO_PATH
+        value: /data/git
+      - key: BUZZ_AUTO_MIGRATE
+        value: "false"
+      - key: BUZZ_GIT_CONFORMANCE_PROBE
+        value: "true"
+
+  - type: keyvalue
+    name: buzz-cache
+    plan: starter
+    region: oregon
+    # All buzz-pubsub Redis keys (presence, rate limiting) carry TTLs, so
+    # eviction under memory pressure is safe and preferable to noeviction
+    # errors on the rate limiter's INCR/EXPIRE path.
+    maxmemoryPolicy: allkeys-lru
+    ipAllowList: []
+
+  # Self-hosted S3-compatible storage for Blossom media, mirroring compose's
+  # minio container. There's no managed object storage on Render; consider
+  # swapping this for an external S3 bucket (set BUZZ_S3_* to sync:false and
+  # point at it) if you'd rather not operate storage yourself.
+  #
+  # minio-init's bucket-creation step has no Blueprint equivalent (no one-off
+  # init job type) — after the first deploy, run once manually:
+  #   mc alias set buzz http://<internal-or-forwarded-address> \
+  #     <BUZZ_S3_ACCESS_KEY value> <BUZZ_S3_SECRET_KEY value>
+  #   mc mb --ignore-existing buzz/buzz-media
+  #   mc anonymous set none buzz/buzz-media
+  - type: pserv
+    name: buzz-storage
+    runtime: image
+    region: oregon
+    plan: starter
+    image:
+      url: docker.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    dockerCommand: server /data --address :9000 --console-address :9001
+    disk:
+      name: buzz-minio-data
+      mountPath: /data
+      sizeGB: 20
+    envVars:
+      # Copied from buzz-relay's generated values so both sides agree on
+      # credentials without hardcoding a secret in the Blueprint.
+      - key: MINIO_ROOT_USER
+        fromService:
+          name: buzz-relay
+          type: web
+          envVarKey: BUZZ_S3_ACCESS_KEY
+      - key: MINIO_ROOT_PASSWORD
+        fromService:
+          name: buzz-relay
+          type: web
+          envVarKey: BUZZ_S3_SECRET_KEY
