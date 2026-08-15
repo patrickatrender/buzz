@@ -85,39 +85,47 @@ services:
     maxmemoryPolicy: allkeys-lru
     ipAllowList: []
 
-  # Self-hosted S3-compatible storage for Blossom media, mirroring compose's
-  # minio container. There's no managed object storage on Render; consider
-  # swapping this for an external S3 bucket (set BUZZ_S3_* to sync:false and
-  # point at it) if you'd rather not operate storage yourself.
-  #
-  # minio-init's bucket-creation step has no Blueprint equivalent (no one-off
-  # init job type) — after the first deploy, run once manually:
-  #   mc alias set buzz http://<internal-or-forwarded-address> \
-  #     <BUZZ_S3_ACCESS_KEY value> <BUZZ_S3_SECRET_KEY value>
-  #   mc mb --ignore-existing buzz/buzz-media
-  #   mc anonymous set none buzz/buzz-media
-  - type: pserv
+  - type: web
     name: buzz-storage
+    healthCheckPath: /minio/health/live
     runtime: image
     region: oregon
-    plan: starter
     image:
-      url: docker.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
-    dockerCommand: server /data --address :9000 --console-address :9001
+      url: cgr.dev/chainguard/minio
+    dockerCommand: >-
+      /bin/sh -c mkdir -p /data &&
+      exec minio server --address $HOST:$PORT --console-address $HOST:$CONSOLE_PORT /data
+    # Use the following 'dockerCommand' if removing the 'minio-console'
+    # web service
+    # dockerCommand: >-
+    #   /bin/sh -c mkdir -p /data &&
+    #   exec minio server --address $HOST:$PORT /data
+    autoDeploy: false
     disk:
       name: buzz-minio-data
       mountPath: /data
       sizeGB: 20
     envVars:
-      # Copied from buzz-relay's generated values so both sides agree on
-      # credentials without hardcoding a secret in the Blueprint.
-      - key: MINIO_ROOT_USER
-        fromService:
-          name: buzz-relay
-          type: web
-          envVarKey: BUZZ_S3_ACCESS_KEY
-      - key: MINIO_ROOT_PASSWORD
-        fromService:
-          name: buzz-relay
-          type: web
-          envVarKey: BUZZ_S3_SECRET_KEY
+    # Copied from buzz-relay's generated values so both sides agree on
+    # credentials without hardcoding a secret in the Blueprint.
+    - key: MINIO_ROOT_USER
+      fromService:
+        name: buzz-relay
+        type: web
+        envVarKey: BUZZ_S3_ACCESS_KEY
+    - key: MINIO_ROOT_PASSWORD
+      fromService:
+        name: buzz-relay
+        type: web
+        envVarKey: BUZZ_S3_SECRET_KEY
+    - key: HOST
+      value: "0.0.0.0"
+    - key: PORT
+      value: 9000
+    - key: CONSOLE_PORT
+      value: 9090
+    # Uncomment the following key/value pair if you are removing the
+    # 'minio-console' web service
+    # - key: MINIO_BROWSER
+    #   value: "off"
+
