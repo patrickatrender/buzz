@@ -87,7 +87,7 @@ services:
 
   - type: pserv
     name: buzz-storage
-    healthCheckPath: /minio/health/live
+    # healthCheckPath: /minio/health/live
     runtime: image
     region: oregon
     image:
